@@ -127,7 +127,7 @@ int main(void) {
         gyro = clamp(gyro);
 
         // Scale gyro
-        gyro = (gyro - MID) / 4;
+        gyro = (gyro - MID) / 2;
         
         int16_t left = throttle + gyro;
         int16_t right = throttle - gyro;
