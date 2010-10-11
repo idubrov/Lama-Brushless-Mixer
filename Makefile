@@ -15,13 +15,16 @@ prog : mixer.dude
 
 .PHONY : clean
 clean :
-	@-rm -f *.hex *.o *.elf
+	@-rm -f *.hex *.o *.elf *.fuse
 
 %.elf : %.o
 	$(CC) $(LDFLAGS) $< $(LOADLIBES) $(LDLIBS) -o $@
 
 %.hex : %.elf
 	$(OBJCOPY) -j .text -j .data -O ihex $< $@
+
+%.fuse : %.elf
+	$(OBJCOPY) -j .fuse -O ihex $< $@
 
 %.dude : %.hex
 	avrdude $(AVRDUDE_FLAGS) -U flash:w:$<:a

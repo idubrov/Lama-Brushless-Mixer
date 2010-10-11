@@ -1,14 +1,21 @@
-#define F_CPU 8000000UL
-//#define F_CPU 1200000UL
+#define F_CPU       8000000UL
+#define F_TIMER1    (F_CPU/8)
+
+// Convert micro seconds to timer ticks
+// For 8Mhz and 1:8 timer prescaler this will be 1 to 1,000,000
+#define USEC(usec)  (F_TIMER1/1000000UL*(usec))
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
 
-#define output_low(port,pin)    port    &= ~(1<<(pin))
-#define output_high(port,pin)   port    |=  (1<<(pin))
-#define set_input(portdir,pin)  portdir &= ~(1<<(pin))
-#define set_output(portdir,pin) portdir |=  (1<<(pin))
+// FUSEs
+FUSES =
+{
+    .low = FUSE_CKSEL0 & FUSE_CKSEL2 & FUSE_CKSEL3 & FUSE_SUT0,
+    .high = HFUSE_DEFAULT,
+    .extended = EFUSE_DEFAULT,
+};
 
 // Inputs
 #define VIN         PORTA3  // Voltage input
@@ -23,22 +30,45 @@
 
 #define GREEN   PORTB2
 
-void delay_ms(uint16_t millis) {
-    while (millis) {
-        _delay_ms(1);
-        millis--;
-    }
-}
-
+// LED control
 #define RED_ON      PORTA &= ~(1<<RED)
 #define RED_OFF     PORTA |=  (1<<RED)
 
 #define GREEN_ON    PORTB &= ~(1<<GREEN)
 #define GREEN_OFF   PORTB |=  (1<<GREEN)
 
-// Current throttle and gyro values (could be out of range 1000-2000)
+// Standard periods
+#define MIN         USEC(1000)
+#define MID         USEC(1500)
+#define MAX         USEC(2000)
+#define PERIOD      USEC(20000)
+
+// Current throttle and gyro values
+// Note that pin change interrupt does not sanitize values, so they could be:
+// 1) negative (if timer was overflowed between start and end)
+// 2) out of range 1000-2000m (1ms-2ms)
+
 volatile int16_t g_throttle = 0;
 volatile int16_t g_gyro = 0;
+
+inline int16_t clamp(int16_t value) {
+    if (value < 0) {
+        value += PERIOD; // add 20ms
+    }
+
+    if (value > MAX) {
+        if (value < MAX + USEC(500)) {
+            // pulse is in 2ms to 2.5ms, clamp to 2ms
+            value = MAX; 
+        } else {
+            // too much, return safe (off) value
+            value = MIN;
+        }
+    } else if (value < MIN) {
+        value = MIN;
+    }
+    return value;
+}
 
 int main(void) {
     // Setup port B
@@ -50,11 +80,11 @@ int main(void) {
     PORTA = (uint8_t) ~(_BV(ESC1) | _BV(ESC2) | _BV(RED));
 
     // Setup Timer1
-    ICR1 = 20000; // TOP
+    ICR1 = PERIOD; // TOP
 
     // Both engines are off
-    OCR1A = 1000;
-    OCR1B = 1000;
+    OCR1A = MIN;
+    OCR1B = MIN;
 
     // COM1A1:0 is 10 (clear OC1A on match, set at BOTTOM)
     // COM1B1:0 is 10 (clear OC1B on match, set at BOTTOM)
@@ -76,10 +106,11 @@ int main(void) {
     // Wait for throttle and gyro
     while(1) {
         cli();
-        if (g_throttle >= 1000 && g_throttle <= 2000 &&
-            g_gyro >= 1000 && g_gyro <= 2000)
+        if (g_throttle >= MIN && g_throttle <= MAX &&
+                g_gyro >= MIN && g_gyro     <= MAX)
             break;
         sei();
+
         _delay_ms(1);
     }
     sei();
@@ -91,37 +122,35 @@ int main(void) {
         int16_t gyro = g_gyro;
         sei();
 
-        // Clamp values to the range
-        if (throttle < 1000)
-            throttle = 1000;
-        else if (throttle > 2000)
-            throttle = 2000;
-
-        if (gyro < 1000)
-            gyro = 1000;
-        else if (gyro > 2000)
-            gyro = 2000;
+        // Clamp values
+        throttle = clamp(throttle);
+        gyro = clamp(gyro);
 
         // Scale gyro
-        gyro = (gyro - 1500) / 4;
+        gyro = (gyro - MID) / 4;
         
         int16_t left = throttle + gyro;
         int16_t right = throttle - gyro;
 
-        if (left < 1000) {
-            right -= (1000 - left);
-            left = 1000;
-        } else if (right < 1000) {
-            left -= (1000 - right);
-            right = 1000;
+        if (left < MIN) {
+            // add RPM to left, remove same amount from right
+            right -= (MIN - left);
+            left = MIN;
+        } else if (right < MIN) {
+            // add RPM to right, remove same amount from left
+            left -= (MIN - right);
+            right = MIN;
         }
 
-        if (left >= 1000 && left <= 2000 && right >= 1000 && right <= 2000) {
+        if (left  >= MIN && left  <= MAX && 
+            right >= MIN && right <= MAX) {
+            // Ok, pass to the engines
             GREEN_ON;
             RED_OFF;
             OCR1A = left;
             OCR1B = right;
         } else {
+            // Not OK, leave previous values
             GREEN_OFF;
             RED_ON;
         }
@@ -133,37 +162,32 @@ ISR(PCINT1_vect, ISR_BLOCK) {
     static uint8_t last;            // last pins state
     static uint16_t throttle_start; // throttle signal started at
     static uint16_t gyro_start;     // gyro signal started at
-    
+   
     uint8_t current = PINB;
     uint16_t timer = TCNT1;
 
+    // if THROTTLE pin changed since last interrupt
     if ((last ^ current) & _BV(THROTTLE)) {
         if (current & _BV(THROTTLE)) {
+            // start pulse
             throttle_start = timer;
         } else {
-            int16_t throttle = timer - throttle_start;
-            // timer overflow check
-            // (note: only one overflow is checked)
-            if (throttle < 0)
-                throttle += 20000;
-
-            g_throttle = throttle;
+            // end pulse
+            g_throttle = timer - throttle_start;
         }
     }
+    // if GYRO pin changed since last interrupt
     if ((last ^ current) & _BV(GYRO)) {
         if (current & _BV(GYRO)) {
+            // start pulse
             gyro_start = timer;
         } else {
-            int16_t gyro = timer - gyro_start;
-            // timer overflow check
-            // (note: only one overflow is checked)
-            if (gyro < 0)
-                gyro += 20000;
-
-            g_gyro = gyro;
+            // end pulse
+            g_gyro = timer - gyro_start;
         }
     }
     last = current;
 }
 
+// FIXME: remove later
 ISR(BADISR_vect) { }
