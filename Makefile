@@ -8,7 +8,7 @@ CC := avr-gcc
 OBJCOPY := avr-objcopy
 
 .PHONY : all
-all : mixer.hex
+all : mixer.hex mixer.fuse
 
 .PHONY : prog
 prog : mixer.dude
