@@ -7,6 +7,7 @@
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <avr/wdt.h>
 #include <util/delay.h>
 
 // FUSEs
@@ -38,10 +39,29 @@ FUSES =
 #define GREEN_OFF   PORTB |=  (1<<GREEN)
 
 // Standard periods
-#define MIN         USEC(1000)
+#define TOLERANCE   USEC(300)
+#define MIN         USEC(1000) - TOLERANCE
+#define MAX         USEC(2000) + TOLERANCE
 #define MID         USEC(1500)
-#define MAX         USEC(2000)
 #define PERIOD      USEC(20000)
+
+// Simple throttle failover. If enabled, a watchdog is configured.
+// Watchdog is reset when valid value is read from the throttle pin.
+// If watchdog interrupt occurs, error status is set and mixer shutdowns
+// the engines until signal re-appears plus few 20ms periods more.
+
+// Watchdog period. The longer is period, the longer it takes for the mixer
+// to detect signal loss (and harder it becomes, due to the noises), the
+// mixer more tolerant to occasional signal loss.
+#define FO_PERIOD   WDTO_60MS
+
+// Amount of 20ms periods to wait after signal was restored. The bigger
+// this number is, the longer it takes to recover. The smaller is number,
+// the more prone mixer is to the noise when signal is lost. Basically,
+// FO_WAIT * 20ms should be greater than FO_PERIOD. Otherwise, when signal
+// is lost, single noise pulse that fits into 1-2ms can be considered as
+// a signal.
+#define FO_WAIT     5
 
 // Current throttle and gyro values
 // Note that pin change interrupt does not sanitize values, so they could be:
@@ -51,26 +71,13 @@ FUSES =
 volatile int16_t g_throttle = 0;
 volatile int16_t g_gyro = 0;
 
-inline int16_t clamp(int16_t value) {
-    if (value < 0) {
-        value += PERIOD; // add 20ms
-    }
-
-    if (value > MAX) {
-        if (value < MAX + USEC(500)) {
-            // pulse is in 2ms to 2.5ms, clamp to 2ms
-            value = MAX; 
-        } else {
-            // too much, return safe (off) value
-            value = MIN;
-        }
-    } else if (value < MIN) {
-        value = MIN;
-    }
-    return value;
-}
+#ifdef FAILOVER
+volatile uint8_t g_wait = 0;
+#endif
 
 int main(void) {
+    wdt_disable();
+
     // Setup port B
     DDRB =   _BV(GREEN);
     PORTB = ~_BV(GREEN);
@@ -92,19 +99,19 @@ int main(void) {
     // CS12:10 is 010 (clkIO / 8 == 1Mhz)
     TCCR1A = _BV(COM1A1) | _BV(COM1B1) | _BV(WGM11);
     TCCR1B = _BV(WGM13)  | _BV(WGM12)  | _BV(CS11); 
-    //TIMSK1 = TOIE1; // enable interrupt on overflow
-
-    PCMSK1 = _BV(PCINT8) | _BV(PCINT9); // enable interrupt on THROTTLE/GYRO change
-    GIMSK =  _BV(PCIE1); // enable interrupots on PORTB pins (THROTTLE/GYRO)
+    
+    // enable interrupt on THROTTLE/GYRO change
+    PCMSK1 = _BV(PCINT8) | _BV(PCINT9); 
+    GIMSK =  _BV(PCIE1);
 
     sei();
 
-    // Show status
+    // initial status
     GREEN_OFF;
     RED_OFF;
 
     // Wait for throttle and gyro
-    while(1) {
+    while (1) {
         cli();
         if (g_throttle >= MIN && g_throttle <= MAX &&
                 g_gyro >= MIN && g_gyro     <= MAX)
@@ -115,16 +122,35 @@ int main(void) {
     }
     sei();
 
-    while(1) {
+#ifdef FAILOVER
+    // ready to go, enable watchdog for throttle values
+    wdt_enable(FO_PERIOD);
+    WDTCSR |= _BV(WDIE);
+#endif
+
+    while (1) {
         cli();
         // Make local copies
         int16_t throttle = g_throttle;
         int16_t gyro = g_gyro;
         sei();
 
-        // Clamp values
-        throttle = clamp(throttle);
-        gyro = clamp(gyro);
+#ifdef FAILOVER
+        // skip few periods after signal was restored
+        while (g_wait > 0) {
+            g_wait--;
+
+            OCR1A = MIN;
+            OCR1B = MIN;
+            _delay_ms(20);
+        }
+#endif
+
+        if (throttle <= MIN || throttle >= MAX ||
+            gyro <= MIN || gyro >= MAX) {
+
+            continue;
+        }
 
         // Scale gyro
         gyro = (gyro - MID) / 2;
@@ -142,17 +168,15 @@ int main(void) {
             right = MIN;
         }
 
+        // If in range, pass to the engines
+        // otherwise, use previous values
         if (left  >= MIN && left  <= MAX && 
             right >= MIN && right <= MAX) {
-            // Ok, pass to the engines
             GREEN_ON;
             RED_OFF;
+
             OCR1A = left;
             OCR1B = right;
-        } else {
-            // Not OK, leave previous values
-            GREEN_OFF;
-            RED_ON;
         }
     }
     return 0;
@@ -173,7 +197,19 @@ ISR(PCINT1_vect, ISR_BLOCK) {
             throttle_start = timer;
         } else {
             // end pulse
-            g_throttle = timer - throttle_start;
+            uint16_t throttle = timer - throttle_start;
+
+            // check for timer overflow
+            if (throttle < 0)
+                throttle += PERIOD;
+
+#ifdef FAILOVER
+            // if throttle value looks OK, reset watchdog
+            if (throttle >= MIN && throttle <= MAX)
+                wdt_reset();
+#endif
+
+            g_throttle = throttle;
         }
     }
     // if GYRO pin changed since last interrupt
@@ -183,11 +219,26 @@ ISR(PCINT1_vect, ISR_BLOCK) {
             gyro_start = timer;
         } else {
             // end pulse
-            g_gyro = timer - gyro_start;
+            uint16_t gyro = timer - gyro_start;
+
+            // check for timer overflow
+            if (gyro < 0)
+                gyro += PERIOD;
+
+            g_gyro = gyro;
         }
     }
     last = current;
 }
 
-// FIXME: remove later
-ISR(BADISR_vect) { }
+#ifdef FAILOVER
+ISR(WDT_vect, ISR_BLOCK) {
+    RED_ON;
+
+    // Skip few periods after signal was restored
+    g_wait = FO_WAIT;
+
+    // re-enable interrupt on watchdog timeout, which is disabled automatically
+    WDTCSR |= _BV(WDIE);
+}
+#endif
