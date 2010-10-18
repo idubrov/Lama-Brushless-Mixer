@@ -1,3 +1,5 @@
+#include "config.h"
+
 #define F_CPU       8000000UL
 #define F_TIMER1    (F_CPU/8)
 
@@ -25,8 +27,19 @@ FUSES =
 #define GYRO        PORTB1
 
 // Outputs
-#define ESC2        PORTA5 // OC1B
-#define ESC1        PORTA6 // OC1A
+#ifndef RUD_INVERT
+    #define ESC2        PORTA5 // OC1B
+    #define ESC1        PORTA6 // OC1A
+
+    #define ESC2VAL     OCR1B
+    #define ESC1VAL     OCR1A
+#else
+    #define ESC1        PORTA5 // OC1B
+    #define ESC2        PORTA6 // OC1A
+
+    #define ESC1VAL     OCR1B
+    #define ESC2VAL     OCR1A
+#endif
 #define RED         PORTA7
 
 #define GREEN   PORTB2
@@ -45,24 +58,6 @@ FUSES =
 #define MID         USEC(1500)
 #define PERIOD      USEC(20000)
 
-// Simple throttle failover. If enabled, a watchdog is configured.
-// Watchdog is reset when valid value is read from the throttle pin.
-// If watchdog interrupt occurs, error status is set and mixer shutdowns
-// the engines until signal re-appears plus few 20ms periods more.
-
-// Watchdog period. The longer is period, the longer it takes for the mixer
-// to detect signal loss (and harder it becomes, due to the noises), the
-// mixer more tolerant to occasional signal loss.
-#define FO_PERIOD   WDTO_60MS
-
-// Amount of 20ms periods to wait after signal was restored. The bigger
-// this number is, the longer it takes to recover. The smaller is number,
-// the more prone mixer is to the noise when signal is lost. Basically,
-// FO_WAIT * 20ms should be greater than FO_PERIOD. Otherwise, when signal
-// is lost, single noise pulse that fits into 1-2ms can be considered as
-// a signal.
-#define FO_WAIT     5
-
 // Current throttle and gyro values
 // Note that pin change interrupt does not sanitize values, so they could be:
 // 1) negative (if timer was overflowed between start and end)
@@ -71,7 +66,7 @@ FUSES =
 volatile int16_t g_throttle = 0;
 volatile int16_t g_gyro = 0;
 
-#ifdef FAILOVER
+#ifdef FO_ENABLED
 volatile uint8_t g_wait = 0;
 #endif
 
@@ -90,8 +85,8 @@ int main(void) {
     ICR1 = PERIOD; // TOP
 
     // Both engines are off
-    OCR1A = MIN;
-    OCR1B = MIN;
+    ESC1VAL = MIN;
+    ESC2VAL = MIN;
 
     // COM1A1:0 is 10 (clear OC1A on match, set at BOTTOM)
     // COM1B1:0 is 10 (clear OC1B on match, set at BOTTOM)
@@ -122,7 +117,7 @@ int main(void) {
     }
     sei();
 
-#ifdef FAILOVER
+#ifdef FO_ENABLED
     // ready to go, enable watchdog for throttle values
     wdt_enable(FO_PERIOD);
     WDTCSR |= _BV(WDIE);
@@ -135,13 +130,13 @@ int main(void) {
         int16_t gyro = g_gyro;
         sei();
 
-#ifdef FAILOVER
+#ifdef FO_ENABLED
         // skip few periods after signal was restored
         while (g_wait > 0) {
             g_wait--;
 
-            OCR1A = MIN;
-            OCR1B = MIN;
+            ESC1VAL = MIN;
+            ESC2VAL = MIN;
             _delay_ms(20);
         }
 #endif
@@ -175,8 +170,8 @@ int main(void) {
             GREEN_ON;
             RED_OFF;
 
-            OCR1A = left;
-            OCR1B = right;
+            ESC1VAL = left;
+            ESC2VAL = right;
         }
     }
     return 0;
@@ -203,7 +198,7 @@ ISR(PCINT1_vect, ISR_BLOCK) {
             if (throttle < 0)
                 throttle += PERIOD;
 
-#ifdef FAILOVER
+#ifdef FO_ENABLED
             // if throttle value looks OK, reset watchdog
             if (throttle >= MIN && throttle <= MAX)
                 wdt_reset();
@@ -231,7 +226,7 @@ ISR(PCINT1_vect, ISR_BLOCK) {
     last = current;
 }
 
-#ifdef FAILOVER
+#ifdef FO_ENABLED
 ISR(WDT_vect, ISR_BLOCK) {
     RED_ON;
 

@@ -2,7 +2,7 @@
 
 AVRDUDE_FLAGS := -p t44 -c avrisp2 -P /dev/ttyUSB0 -v
 CHIP := attiny44
-CFLAGS := -Os -DFAILOVER -mmcu=$(CHIP)
+CFLAGS := -Os -mmcu=$(CHIP)
 LDFLAGS := -mmcu=$(CHIP)
 CC := avr-gcc
 OBJCOPY := avr-objcopy
