@@ -192,7 +192,7 @@ ISR(PCINT1_vect, ISR_BLOCK) {
             throttle_start = timer;
         } else {
             // end pulse
-            uint16_t throttle = timer - throttle_start;
+            int16_t throttle = timer - throttle_start;
 
             // check for timer overflow
             if (throttle < 0)
@@ -214,7 +214,7 @@ ISR(PCINT1_vect, ISR_BLOCK) {
             gyro_start = timer;
         } else {
             // end pulse
-            uint16_t gyro = timer - gyro_start;
+            int16_t gyro = timer - gyro_start;
 
             // check for timer overflow
             if (gyro < 0)
