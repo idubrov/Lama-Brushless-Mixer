@@ -59,10 +59,7 @@ FUSES =
 #define PERIOD      USEC(20000)
 
 // Current throttle and gyro values
-// Note that pin change interrupt does not sanitize values, so they could be:
-// 1) negative (if timer was overflowed between start and end)
-// 2) out of range 1000-2000m (1ms-2ms)
-
+// Note that pin change interrupt does not sanitize values, so they could be out of range.
 volatile int16_t g_throttle = 0;
 volatile int16_t g_gyro = 0;
 
