@@ -8,14 +8,14 @@ CC := avr-gcc
 OBJCOPY := avr-objcopy
 
 .PHONY : all
-all : mixer.hex mixer.fuse
+all : mixer.hex
 
 .PHONY : prog
-prog : mixer.dude
+install : mixer.install
 
 .PHONY : clean
 clean :
-	@-rm -f *.hex *.o *.elf *.fuse
+	@-rm -f *.hex *.o *.elf *.fuse *.lfuse *.hfuse *.efuse
 
 %.elf : %.o
 	$(CC) $(LDFLAGS) $< $(LOADLIBES) $(LDLIBS) -o $@
@@ -24,7 +24,21 @@ clean :
 	$(OBJCOPY) -j .text -j .data -O ihex $< $@
 
 %.fuse : %.elf
-	$(OBJCOPY) -j .fuse -O ihex $< $@
+	$(OBJCOPY) -j .fuse -O binary $< $@
 
-%.dude : %.hex
+%.lfuse : %.fuse
+	dd if=$< of=$@ skip=0 bs=1 count=1
+
+%.hfuse : %.fuse
+	dd if=$< of=$@ skip=1 bs=1 count=1
+
+%.efuse : %.fuse
+	dd if=$< of=$@ skip=2 bs=1 count=1
+
+%.fuses : %.lfuse %.hfuse %.efuse
+	avrdude $(AVRDUDE_FLAGS) -U lfuse:w:$*.lfuse:r
+	avrdude $(AVRDUDE_FLAGS) -U hfuse:w:$*.hfuse:r
+	avrdude $(AVRDUDE_FLAGS) -U efuse:w:$*.efuse:r
+
+%.install : %.hex
 	avrdude $(AVRDUDE_FLAGS) -U flash:w:$<:a
