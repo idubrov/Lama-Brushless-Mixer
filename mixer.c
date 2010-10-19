@@ -115,7 +115,8 @@ int main(void) {
 
     wait_input();
     
-    calibrate();
+    // need trigger for calibration, either jumper on output or special throttle value
+    //calibrate();
 
 #ifdef FO_ENABLED
     // ready to go, enable watchdog for throttle values
