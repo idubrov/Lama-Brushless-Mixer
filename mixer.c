@@ -105,8 +105,7 @@ int main(void) {
     // Wait for throttle and gyro
     while (1) {
         cli();
-        if (g_throttle >= MIN && g_throttle <= MAX &&
-                g_gyro >= MIN && g_gyro     <= MAX)
+        if (g_throttle >= MIN && g_throttle <= MAX && g_gyro >= MIN && g_gyro <= MAX)
             break;
         sei();
 
@@ -138,8 +137,7 @@ int main(void) {
         }
 #endif
 
-        if (throttle <= MIN || throttle >= MAX ||
-            gyro <= MIN || gyro >= MAX) {
+        if (throttle <= MIN || throttle >= MAX || gyro <= MIN || gyro >= MAX) {
 
             continue;
         }
@@ -160,12 +158,9 @@ int main(void) {
             right = MIN;
         }
 
-        // If in range, pass to the engines
-        // otherwise, use previous values
-        if (left  >= MIN && left  <= MAX && 
-            right >= MIN && right <= MAX) {
+        // If in range, pass to the engines otherwise, use previous values
+        if (left  >= MIN && left  <= MAX && right >= MIN && right <= MAX) {
             GREEN_ON;
-            RED_OFF;
 
             ESC1VAL = left;
             ESC2VAL = right;
@@ -225,7 +220,7 @@ ISR(PCINT1_vect, ISR_BLOCK) {
 
 #ifdef FO_ENABLED
 ISR(WDT_vect, ISR_BLOCK) {
-    RED_ON;
+    GREEN_OFF;
 
     // Skip few periods after signal was restored
     g_wait = FO_WAIT;
