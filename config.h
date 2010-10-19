@@ -24,3 +24,8 @@
 // Invert rudder. Can be used when you don't want to change gyro direction.
 // Note that in that case you may need to invert rudder channel on radio too.
 //#define RUD_INVERT
+
+
+
+// Capture values for 5 seconds (250 * 20ms) when calibrating
+#define CALIBRATE_PERIODS 	250

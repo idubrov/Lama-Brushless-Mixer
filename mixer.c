@@ -10,6 +10,7 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <avr/wdt.h>
+#include <avr/eeprom.h>
 #include <util/delay.h>
 
 // FUSEs
@@ -51,7 +52,7 @@ FUSES =
 #define GREEN_ON    PORTB &= ~(1<<GREEN)
 #define GREEN_OFF   PORTB |=  (1<<GREEN)
 
-// Standard periods
+// Uncalibrated periods
 #define TOLERANCE   USEC(300)
 #define MIN         USEC(1000) - TOLERANCE
 #define MAX         USEC(2000) + TOLERANCE
@@ -60,58 +61,61 @@ FUSES =
 
 // Current throttle and gyro values
 // Note that pin change interrupt does not sanitize values, so they could be out of range.
-volatile int16_t g_throttle = 0;
-volatile int16_t g_gyro = 0;
+volatile uint16_t g_throttle = 0;
+volatile uint16_t g_gyro = 0;
 
 #ifdef FO_ENABLED
 volatile uint8_t g_wait = 0;
 #endif
 
+// range
+typedef struct range_t {
+    uint16_t min;
+    uint16_t max;
+} range_t;
+
+static inline int in_range(int16_t value, range_t range) {
+    return value >= range.min && value <= range.max;
+}
+
+// ranges for two channels
+typedef struct calibration_t {
+    range_t throttle;
+    range_t gyro;
+} calibration_t;
+
+EEMEM calibration_t e_calibration = { 
+    .throttle = { .min = MID, .max = MID }, 
+    .gyro     = { .min = MID, .max = MID } 
+};
+
+// calibrated values replicated to RAM
+EEMEM calibration_t g_calibration = { 
+    .throttle = { .min = MIN, .max = MAX }, 
+    .gyro     = { .min = MIN, .max = MAX } 
+};
+
+static void setup_io();
+static void setup_timer();
+static void wait_input();
+static void calibrate();
+static void process_input();
+
 int main(void) {
     wdt_disable();
-
-    // Setup port B
-    DDRB =   _BV(GREEN);
-    PORTB = ~_BV(GREEN);
-
-    // Setup port A
-    DDRA =              _BV(ESC1) | _BV(ESC2) | _BV(RED);
-    PORTA = (uint8_t) ~(_BV(ESC1) | _BV(ESC2) | _BV(RED));
-
-    // Setup Timer1
-    ICR1 = PERIOD; // TOP
-
-    // Both engines are off
-    ESC1VAL = MIN;
-    ESC2VAL = MIN;
-
-    // COM1A1:0 is 10 (clear OC1A on match, set at BOTTOM)
-    // COM1B1:0 is 10 (clear OC1B on match, set at BOTTOM)
-    // WGM13:10 is 1110 (Fast PWM, TOP at ICR1)
-    // CS12:10 is 010 (clkIO / 8 == 1Mhz)
-    TCCR1A = _BV(COM1A1) | _BV(COM1B1) | _BV(WGM11);
-    TCCR1B = _BV(WGM13)  | _BV(WGM12)  | _BV(CS11); 
     
-    // enable interrupt on THROTTLE/GYRO change
-    PCMSK1 = _BV(PCINT8) | _BV(PCINT9); 
-    GIMSK =  _BV(PCIE1);
-
-    sei();
+    setup_io();
+    setup_timer();
 
     // initial status
     GREEN_OFF;
     RED_OFF;
-
-    // Wait for throttle and gyro
-    while (1) {
-        cli();
-        if (g_throttle >= MIN && g_throttle <= MAX && g_gyro >= MIN && g_gyro <= MAX)
-            break;
-        sei();
-
-        _delay_ms(1);
-    }
+    
     sei();
+
+    wait_input();
+    
+    calibrate();
 
 #ifdef FO_ENABLED
     // ready to go, enable watchdog for throttle values
@@ -119,56 +123,15 @@ int main(void) {
     WDTCSR |= _BV(WDIE);
 #endif
 
-    while (1) {
-        cli();
-        // Make local copies
-        int16_t throttle = g_throttle;
-        int16_t gyro = g_gyro;
-        sei();
+    // load calibrated values
+    //eeprom_read_block(&g_calibration, &e_calibration, sizeof(e_calibration));
 
-#ifdef FO_ENABLED
-        // skip few periods after signal was restored
-        while (g_wait > 0) {
-            g_wait--;
-
-            ESC1VAL = MIN;
-            ESC2VAL = MIN;
-            _delay_ms(20);
-        }
-#endif
-
-        if (throttle <= MIN || throttle >= MAX || gyro <= MIN || gyro >= MAX) {
-
-            continue;
-        }
-
-        // Scale gyro
-        gyro = (gyro - MID) / 2;
-        
-        int16_t left = throttle + gyro;
-        int16_t right = throttle - gyro;
-
-        if (left < MIN) {
-            // add RPM to left, remove same amount from right
-            right -= (MIN - left);
-            left = MIN;
-        } else if (right < MIN) {
-            // add RPM to right, remove same amount from left
-            left -= (MIN - right);
-            right = MIN;
-        }
-
-        // If in range, pass to the engines otherwise, use previous values
-        if (left  >= MIN && left  <= MAX && right >= MIN && right <= MAX) {
-            GREEN_ON;
-
-            ESC1VAL = left;
-            ESC2VAL = right;
-        }
-    }
+    while(1)
+        process_input();
     return 0;
 }
 
+// Capture input pin changes
 ISR(PCINT1_vect, ISR_BLOCK) {
     static uint8_t last;            // last pins state
     static uint16_t throttle_start; // throttle signal started at
@@ -196,7 +159,7 @@ ISR(PCINT1_vect, ISR_BLOCK) {
                 wdt_reset();
 #endif
 
-            g_throttle = throttle;
+            g_throttle = (uint16_t) throttle;
         }
     }
     // if GYRO pin changed since last interrupt
@@ -212,13 +175,14 @@ ISR(PCINT1_vect, ISR_BLOCK) {
             if (gyro < 0)
                 gyro += PERIOD;
 
-            g_gyro = gyro;
+            g_gyro = (uint16_t) gyro;
         }
     }
     last = current;
 }
 
 #ifdef FO_ENABLED
+// Signal watchdog handler
 ISR(WDT_vect, ISR_BLOCK) {
     GREEN_OFF;
 
@@ -228,4 +192,135 @@ ISR(WDT_vect, ISR_BLOCK) {
     // re-enable interrupt on watchdog timeout, which is disabled automatically
     WDTCSR |= _BV(WDIE);
 }
+    
+// Skip few periods after signal was restored
+static void fo_skip_frames() {
+    while (g_wait > 0) {
+        g_wait--;
+
+        ESC1VAL = g_calibration.throttle.min;
+        ESC2VAL = g_calibration.throttle.min;
+        _delay_ms(20);
+    }
+}
+#else
+static void fo_skip_frames() { }
 #endif
+
+// Setup input/output ports
+static void setup_io() {
+    // Setup port B
+    DDRB =   _BV(GREEN);
+    PORTB = ~_BV(GREEN);
+
+    // Setup port A
+    DDRA =              _BV(ESC1) | _BV(ESC2) | _BV(RED);
+    PORTA = (uint8_t) ~(_BV(ESC1) | _BV(ESC2) | _BV(RED));
+
+    // enable interrupt on THROTTLE/GYRO change
+    PCMSK1 = _BV(PCINT8) | _BV(PCINT9); 
+    GIMSK =  _BV(PCIE1);
+}
+
+// Setup 16-bit timer for PWM on two channels with frequency 50Hz
+static void setup_timer() {
+    // Setup Timer1
+    ICR1 = PERIOD; // TOP
+
+    // Both engines are off
+    ESC1VAL = MIN;
+    ESC2VAL = MIN;
+
+    // COM1A1:0 is 10 (clear OC1A on match, set at BOTTOM)
+    // COM1B1:0 is 10 (clear OC1B on match, set at BOTTOM)
+    // WGM13:10 is 1110 (Fast PWM, TOP at ICR1)
+    // CS12:10 is 010 (clkIO / 8 == 1Mhz)
+    TCCR1A = _BV(COM1A1) | _BV(COM1B1) | _BV(WGM11);
+    TCCR1B = _BV(WGM13)  | _BV(WGM12)  | _BV(CS11); 
+}
+
+// Wait for valid throttle and gyro input
+static void wait_input() {
+    while (1) {
+        cli();
+        if (g_throttle >= MIN && g_throttle <= MAX && g_gyro >= MIN && g_gyro <= MAX)
+            break;
+        sei();
+
+        _delay_ms(1);
+    }
+    sei();
+}
+
+// Calibrate min/max values for throttle/gyro
+static void calibrate() {
+    RED_ON;
+    GREEN_ON;
+
+    calibration_t calib = { .throttle = { .min = MID, .max = MID }, 
+                            .gyro     = { .min = MID, .max = MID } };
+
+    for (uint8_t i = 0; i < CALIBRATE_PERIODS; ++i) {
+        cli();
+        uint16_t t = g_throttle;
+        uint16_t g = g_gyro;
+        sei();
+
+        if (t < calib.throttle.min)
+            calib.throttle.min = t;
+        else if (t > calib.throttle.max)
+            calib.throttle.max = t;
+
+        if (g < calib.gyro.min)
+            calib.gyro.min = g;
+        else if (g > calib.gyro.max)
+            calib.gyro.max = g;
+
+        _delay_ms(20);
+    }
+
+    eeprom_write_block(&calib, &e_calibration, sizeof(e_calibration));
+
+    RED_OFF;
+    GREEN_OFF;
+}
+
+static void process_input() {
+    cli();
+    // Make local copies
+    uint16_t throttle = g_throttle;
+    uint16_t gyro = g_gyro;
+    sei();
+
+    // failover
+    fo_skip_frames();
+
+    if (!in_range(throttle, g_calibration.throttle) || !in_range(gyro, g_calibration.gyro)) {
+        return;
+    }
+
+    // Scale gyro
+    gyro = (uint16_t)(gyro - MID) >> 1;
+        
+    uint16_t left = throttle + gyro;
+    uint16_t right = throttle - gyro;
+
+    const uint16_t tmin = g_calibration.throttle.min;
+    if (left < tmin) {
+        // add RPM to left, remove same amount from right
+        right -= (tmin - left);
+        left = tmin;
+    } else if (right < tmin) {
+        // add RPM to right, remove same amount from left
+        left -= (tmin - right);
+        right = tmin;
+    }
+
+    // If in range, pass to the engines otherwise, use previous values
+    if (in_range(left, g_calibration.throttle) && in_range(right, g_calibration.throttle)) {
+        GREEN_ON;
+
+        ESC1VAL = left;
+        ESC2VAL = right;
+    }
+}
