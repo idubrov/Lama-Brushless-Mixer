@@ -90,7 +90,7 @@ EEMEM calibration_t e_calibration = {
 };
 
 // calibrated values replicated to RAM
-EEMEM calibration_t g_calibration = { 
+calibration_t g_calibration = { 
     .throttle = { .min = MIN, .max = MAX }, 
     .gyro     = { .min = MIN, .max = MAX } 
 };
@@ -114,21 +114,22 @@ int main(void) {
     sei();
 
     wait_input();
-    
-    // need trigger for calibration, either jumper on output or special throttle value
-    //calibrate();
+
+    if (g_throttle > MID) {
+        calibrate();
+    } else {
+        // load calibrated values
+        eeprom_read_block(&g_calibration, &e_calibration, sizeof(e_calibration));
 
 #ifdef FO_ENABLED
-    // ready to go, enable watchdog for throttle values
-    wdt_enable(FO_PERIOD);
-    WDTCSR |= _BV(WDIE);
+        // ready to go, enable watchdog for throttle values
+        wdt_enable(FO_PERIOD);
+        WDTCSR |= _BV(WDIE);
 #endif
 
-    // load calibrated values
-    //eeprom_read_block(&g_calibration, &e_calibration, sizeof(e_calibration));
-
-    while(1)
-        process_input();
+        while(1)
+            process_input();
+    }
     return 0;
 }
 
@@ -156,7 +157,7 @@ ISR(PCINT1_vect, ISR_BLOCK) {
 
 #ifdef FO_ENABLED
             // if throttle value looks OK, reset watchdog
-            if (throttle >= MIN && throttle <= MAX)
+            if (in_range(throttle, g_calibration.throttle))
                 wdt_reset();
 #endif
 
