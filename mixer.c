@@ -85,9 +85,11 @@ typedef struct calibration_t {
 } calibration_t;
 
 EEMEM calibration_t e_calibration = { 
-    .throttle = { .min = MID, .max = MID }, 
-    .gyro     = { .min = MID, .max = MID } 
+    .throttle = { .min = MIN, .max = MAX },
+    .gyro     = { .min = MIN, .max = MAX }
 };
+
+EEMEM calibration_t e_calibration2;
 
 // calibrated values replicated to RAM
 calibration_t g_calibration = { 
@@ -105,6 +107,10 @@ int main(void) {
     wdt_disable();
     
     setup_io();
+
+    // load calibrated values
+    eeprom_read_block(&g_calibration, &e_calibration, sizeof(e_calibration));
+
     setup_timer();
 
     // initial status
@@ -118,8 +124,6 @@ int main(void) {
     if (g_throttle > MID) {
         calibrate();
     } else {
-        // load calibrated values
-        eeprom_read_block(&g_calibration, &e_calibration, sizeof(e_calibration));
 
 #ifdef FO_ENABLED
         // ready to go, enable watchdog for throttle values
@@ -230,8 +234,8 @@ static void setup_timer() {
     ICR1 = PERIOD; // TOP
 
     // Both engines are off
-    ESC1VAL = MIN;
-    ESC2VAL = MIN;
+    ESC1VAL = g_calibration.throttle.min;
+    ESC2VAL = g_calibration.throttle.min;
 
     // COM1A1:0 is 10 (clear OC1A on match, set at BOTTOM)
     // COM1B1:0 is 10 (clear OC1B on match, set at BOTTOM)
@@ -243,6 +247,7 @@ static void setup_timer() {
 
 // Wait for valid throttle and gyro input
 static void wait_input() {
+    RED_ON;
     while (1) {
         cli();
         if (g_throttle >= MIN && g_throttle <= MAX && g_gyro >= MIN && g_gyro <= MAX)
@@ -252,6 +257,7 @@ static void wait_input() {
         _delay_ms(1);
     }
     sei();
+    RED_OFF;
 }
 
 // Calibrate min/max values for throttle/gyro
@@ -302,7 +308,7 @@ static void process_input() {
     }
 
     // Scale gyro
-    gyro = (uint16_t)(gyro - MID) >> 1;
+    gyro = (int16_t)(gyro - MID) >> 1;
         
     uint16_t left = throttle + gyro;
     uint16_t right = throttle - gyro;
