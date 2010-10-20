@@ -4,7 +4,7 @@
 // reset when valid value is read from the throttle pin. If watchdog interrupt
 // occurs, error status is set and mixer shutdowns the engines until signal
 // re-appears plus few 20ms periods more.
-#define FO_ENABLED
+//#define FO_ENABLED
 
 // Watchdog period. The longer is period, the longer it takes for the mixer
 // to detect signal loss (and harder it becomes, due to the noises), the
